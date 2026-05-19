@@ -143,8 +143,9 @@ std::string expandUnprintable(const std::string& s, char quotes, char addQuotes)
         r += addQuotes;
     }
 
-    for (const char& c: s)
+    for (size_t i = 0; i < s.size(); i++)
     {
+        char c = s[i];
         if (isprint(c))
         {
             if ((c == '\\') || (quotes && (c == quotes)))
@@ -170,7 +171,7 @@ std::string expandUnprintable(const std::string& s, char quotes, char addQuotes)
             case '\v': r += 'v'; break;
             default:
                 // Hex/octal byte.
-                char next = *(&c + 1);
+                char next = (i + 1 < s.size()) ? s[i + 1] : 0;
                 if (std::isxdigit(unsigned(next)))
                 {
                     // Next digit is a valid hex digit:
@@ -203,6 +204,7 @@ UNIT_TEST(expandUnprintable)
     ASSERT_EQ(expandUnprintable("ab\"c", '"', '"'), "\"ab\\\"c\"");
     ASSERT_EQ(expandUnprintable("abc\r\n\t   "), "abc\\r\\n\\t   ");
     ASSERT_EQ(expandUnprintable("\xaa\x61"), "\\252a");
+    ASSERT_EQ(expandUnprintable("\xaa"), "\\xaa");
     ASSERT_EQ(expandUnprintable(std::string("a\0b", 3)), "a\\000b");
 }
 
@@ -997,10 +999,26 @@ std::string readFile(const std::string& filename)
     {
         throw std::runtime_error(std::format("readFile({}): Error while opening file for reading.", filename));
     }
-    size_t size = is.tellg();
+    std::ifstream::pos_type endPos = is.tellg();
+    if (endPos < 0)
+    {
+        throw std::runtime_error(std::format("readFile({}): Error while determining file size.", filename));
+    }
+    size_t size = static_cast<size_t>(endPos);
     is.seekg(0, is.beg);
+    if (!is)
+    {
+        throw std::runtime_error(std::format("readFile({}): Error while seeking file.", filename));
+    }
     std::string r(size, '\0');
-    is.read(&r[0], size);
+    if (size != 0)
+    {
+        is.read(&r[0], size);
+    }
+    if (!is)
+    {
+        throw std::runtime_error(std::format("readFile({}): Error while reading file.", filename));
+    }
     return r;
 }
 
@@ -1013,6 +1031,15 @@ void writeFile(const std::string& filename, const std::string& data)
         throw std::runtime_error(std::format("writeFile({}): Error while opening file for writing.", filename));
     }
     os.write(data.data(), data.size());
+    if (!os)
+    {
+        throw std::runtime_error(std::format("writeFile({}): Error while writing file.", filename));
+    }
+    os.close();
+    if (!os)
+    {
+        throw std::runtime_error(std::format("writeFile({}): Error while closing file.", filename));
+    }
 }
 
 UNIT_TEST(readFile_writeFile)

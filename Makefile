@@ -25,7 +25,9 @@ CXXFLAGS ?= -Weverything \
 	-Wno-global-constructors \
 	-Wno-implicit-int-float-conversion \
 	-Wno-unsafe-buffer-usage \
-	-Wno-unsafe-buffer-usage-in-libc-call -O3
+	-Wno-unsafe-buffer-usage-in-libc-call \
+	-Wno-extra-semi-stmt \
+	-O3
 
 CXXSTD ?= -std=c++23
 
