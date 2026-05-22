@@ -8,8 +8,7 @@ TARGET = scanbadblocks
 
 CPPFLAGS ?= -pedantic
 
-#CXXFLAGS ?= -Wall -Wextra
-CXXFLAGS ?= -Weverything \
+WARNING_FLAGS ?= -Weverything \
 	-Wno-c++98-compat \
 	-Wno-c++98-compat-pedantic \
 	-Wno-padded \
@@ -26,8 +25,8 @@ CXXFLAGS ?= -Weverything \
 	-Wno-implicit-int-float-conversion \
 	-Wno-unsafe-buffer-usage \
 	-Wno-unsafe-buffer-usage-in-libc-call \
-	-Wno-extra-semi-stmt \
-	-O3
+	-Wno-extra-semi-stmt
+CXXFLAGS ?= -O3 -Wall
 
 CXXSTD ?= -std=c++23
 
@@ -52,9 +51,7 @@ clean:
 	rm -rf build $(TARGET) unit_test
 	find . -name '*~' -delete
 
-uint_test: clean
 unit_test: CPPFLAGS += -D ENABLE_UNIT_TEST
-unit_test: CXXFLAGS += -Wno-weak-vtables -Wno-missing-variable-declarations -Wno-exit-time-destructors -Wno-global-constructors
 unit_test: $(OBJECTS)
 	$(CXX) $^ -o $@
 	./unit_test
@@ -71,9 +68,12 @@ tidy: $(TARGET)
 	echo "]" >> $(BUILDDIR)/compile_commands.json
 	clang-tidy -p $(BUILDDIR) --config-file .clang-tidy src/*.cpp src/*.hpp
 
-.PHONY: clean default unit_test test format
+warnings:
+	$(MAKE) clean
+	$(MAKE) CXXFLAGS="-O3 $(WARNING_FLAGS)" $(TARGET)
+
+.PHONY: clean default unit_test test format warnings
 
 ifeq ($(findstring $(MAKECMDGOALS),clean),)
 -include $(DEPENDS)
 endif
-

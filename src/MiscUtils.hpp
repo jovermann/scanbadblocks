@@ -114,6 +114,9 @@ template<typename T> std::vector<T> csvIntegersToVector(std::string_view s, int 
     return r;
 }
 
+/// Get compilation date in ISO format.
+std::string getCompileDate();
+
 // --- String utilities: Misc. ---
 
 /// Split string at separator char.

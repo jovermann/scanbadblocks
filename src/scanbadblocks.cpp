@@ -344,7 +344,7 @@ int main(int argc, char* argv[])
                                   "\n"
                                   "Usage: $programName [OPTIONS] BLOCK_DEVICE\n"
                                   "\n",
-                                  "$programName version $version *** Copyright (c) 2025 Johannes Overmann *** https://github.com/jovermann/scanbadblocks",
+                                  "$programName version $version ($compileDate) *** Copyright (c) 2025 Johannes Overmann *** https://github.com/jovermann/scanbadblocks",
                                   "1.0.3");
 
         cl.addHeader("\nOptions:\n");

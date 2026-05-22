@@ -25,6 +25,48 @@
 namespace ut1
 {
 
+static std::string compilerDateToIso(std::string_view date)
+{
+    const std::string monthName(date.substr(0, 3));
+    std::string month = "01";
+    if (monthName == "Feb") { month = "02"; }
+    else if (monthName == "Mar") { month = "03"; }
+    else if (monthName == "Apr") { month = "04"; }
+    else if (monthName == "May") { month = "05"; }
+    else if (monthName == "Jun") { month = "06"; }
+    else if (monthName == "Jul") { month = "07"; }
+    else if (monthName == "Aug") { month = "08"; }
+    else if (monthName == "Sep") { month = "09"; }
+    else if (monthName == "Oct") { month = "10"; }
+    else if (monthName == "Nov") { month = "11"; }
+    else if (monthName == "Dec") { month = "12"; }
+    std::string day(date.substr(4, 2));
+    if (day[0] == ' ')
+    {
+        day[0] = '0';
+    }
+    return std::string(date.substr(7, 4)) + "-" + month + "-" + day;
+}
+
+
+std::string getCompileDate()
+{
+    return compilerDateToIso(__DATE__);
+}
+
+
+UNIT_TEST(getCompileDate)
+{
+    ASSERT_EQ(compilerDateToIso("Jan  1 2026"), "2026-01-01");
+    ASSERT_EQ(compilerDateToIso("May 22 2026"), "2026-05-22");
+    ASSERT_EQ(compilerDateToIso("Dec 31 2026"), "2026-12-31");
+
+    const std::string compileDate = getCompileDate();
+    ASSERT_EQ(compileDate.size(), size_t(10));
+    ASSERT_EQ(compileDate[4], '-');
+    ASSERT_EQ(compileDate[7], '-');
+}
+
 
 bool hasPrefix(const std::string& s, const std::string& prefix) noexcept
 {

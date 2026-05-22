@@ -161,7 +161,7 @@ void CommandLineParser::parse(int argc, const char* argv[])
 
     if (isSet("version"))
     {
-        printMessage("version " + version);
+        printMessage("version " + version + " (" + getCompileDate() + ")");
         std::exit(0);
     }
 }
@@ -382,6 +382,7 @@ std::string CommandLineParser::getUsageStr() const
     std::string u = ret.str();
     ut1::replaceStringInPlace(u, "$programName", programName);
     ut1::replaceStringInPlace(u, "$version", version);
+    ut1::replaceStringInPlace(u, "$compileDate", getCompileDate());
 
     return u;
 }
