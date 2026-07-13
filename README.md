@@ -16,6 +16,9 @@ Usage: scanbadblocks [OPTIONS] BLOCK_DEVICE
 
 Options:
   -b --block-size=BLOCKSIZE Granularity of reads/writes in bytes. (default=4M)
+  -s --stride=STRIDE        Distance between read/write offsets. The default tracks --block-size. Use
+                            values larger than --block-size to sample the full disk range, e.g.
+                            --block-size=1M --stride=1G.
   -w --overwrite            Overwrite device with known pattern and then read it back. This immediately
                             destroys the contents of the disk, erases the disk and deletes all files on the
                             disk. Specify twice to override interactive safety prompt. The default is just
