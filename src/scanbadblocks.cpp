@@ -7,6 +7,8 @@
 
 #include <iostream>
 #include <filesystem>
+#include <cerrno>
+#include <cstring>
 #include <utility>
 #include <functional>
 #include <numeric>
@@ -36,7 +38,7 @@ public:
         numBlocks = (sizeBytes + blockSize - 1) / blockSize;
         blockStats.resize(numBlocks);
         std::cout << std::format("{}: Size={:.1f} GB ({}, numBlocks={}, blockSize={}, size is a multiple of {})\n",
-            filename_, sizeBytes / GB, ut1::getPreciseSizeStr(sizeBytes), numBlocks,
+            filename_, sizeBytes / GB, ut1::getApproxSizeStr(sizeBytes, 1), numBlocks,
             ut1::getPreciseSizeStr(blockSize), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
         if (sizeBytes == 0)
         {
@@ -85,6 +87,7 @@ private:
         blockStats.clear();
         blockStats.resize(numBlocks);
         lastProgressTime = ut1::getTimeSec();
+        lastProgressBytes = 0.0;
 
         int fd = ::open(filename.c_str(), O_RDONLY);
         if (fd < 0)
@@ -93,11 +96,10 @@ private:
         }
 
         std::vector<uint8_t> buffer(blockSize);
-        std::vector<uint8_t> expected(blockSize, *pattern);
+        std::vector<uint8_t> expected(blockSize, pattern.value_or(0));
 
         for (size_t blockIndex = 0; blockIndex < numBlocks; blockIndex++)
         {
-            initBlock(expected, blockIndex, *pattern);
             size_t accessSize = blockSize;
             if ((blockIndex + 1) * blockSize > sizeBytes)
             {
@@ -115,7 +117,8 @@ private:
             {
                 if (pattern)
                 {
-                    for (size_t i = 0; i < blockSize; i++)
+                    initBlock(expected, blockIndex, *pattern);
+                    for (size_t i = 0; i < accessSize; i++)
                     {
                         if (buffer[i] != expected[i])
                         {
@@ -145,6 +148,7 @@ private:
         blockStats.clear();
         blockStats.resize(numBlocks);
         lastProgressTime = ut1::getTimeSec();
+        lastProgressBytes = 0.0;
 
         // Open outfile.
         int  fd = ::open(filename.c_str(), O_WRONLY, 0666);
@@ -205,7 +209,11 @@ private:
             totalWriteBytes = numPasses / 2 * totalBytesOnePass;
         }
 
-        double bytes = double(blockIndex) * blockSize;
+        double bytes = std::min(double(blockIndex + 1) * blockSize, double(sizeBytes));
+        double currentBytesPerSecond = (bytes - lastProgressBytes) / elapsed;
+        const bool currentPassIsRead = (numPasses == 1) || (passIndex & 1);
+        double currentReadBytesPerSecond = currentPassIsRead ? currentBytesPerSecond : 0.0;
+        double currentWriteBytesPerSecond = currentPassIsRead ? 0.0 : currentBytesPerSecond;
         double percent = (passIndex * totalBytesOnePass + bytes) / (totalReadBytes + totalWriteBytes) * 100.0;
         double remainingSec = 0.0;
         if (getReadBytesPerSecond() > 0.0)
@@ -221,11 +229,13 @@ private:
         {
             remainingSec += (totalWriteBytes - totalWrite.bytes) / getWriteBytesPerSecond();
         }
-        std::cout << std::format("{:6d}/{:6d} {:.1f}/{:.1f}MB {:4.1f}% remaining={} read={:.1f}MB/s write={:.1f}MB/s   \r",
+        std::cout << std::format("{:6d}/{:6d} {:.1f}/{:.1f}MB {:4.1f}% remaining={} read={:.1f}MB/s(avg={:.1f}) write={:.1f}MB/s(avg={:.1f})   \r",
             blockIndex, numBlocks, bytes / MB, totalBytesOnePass / MB,
             percent, ut1::secondsToString(remainingSec),
-            getReadBytesPerSecond() / MB, getWriteBytesPerSecond() / MB) << std::flush;
+            currentReadBytesPerSecond / MB, getReadBytesPerSecond() / MB,
+            currentWriteBytesPerSecond / MB, getWriteBytesPerSecond() / MB) << std::flush;
         lastProgressTime = now;
+        lastProgressBytes = bytes;
     }
 
     double getReadBytesPerSecond()
@@ -277,7 +287,8 @@ private:
         {
             avg = sizeBytes / totalTime / MB;
         }
-        std::cout << std::format("pass {}/{} ({}): {} errors (min={:.1f}MB/s avg={:.1f}MB/s med={:.1f}MB/s max={:.1f}MB/s)                        \n", passIndex + 1, numPasses, readWrite, errors, min, avg, med, max);
+        std::cout << std::format("pass {}/{} ({}): {} errors (time={} min={:.1f}MB/s avg={:.1f}MB/s med={:.1f}MB/s max={:.1f}MB/s)                        \n",
+            passIndex + 1, numPasses, readWrite, errors, ut1::secondsToString(totalTime), min, avg, med, max);
         std::vector<double> percentiles({50, 20, 10, 5});
         for (double percent: percentiles)
         {
@@ -324,6 +335,7 @@ private:
 
     // State:
     double lastProgressTime{};
+    double lastProgressBytes{};
     size_t passIndex{};
     size_t readPassesRemaining{};
     size_t writePassesRemaining{};
@@ -344,8 +356,8 @@ int main(int argc, char* argv[])
                                   "\n"
                                   "Usage: $programName [OPTIONS] BLOCK_DEVICE\n"
                                   "\n",
-                                  "$programName version $version ($compileDate) *** Copyright (c) 2025 Johannes Overmann *** https://github.com/jovermann/scanbadblocks",
-                                  "1.0.3");
+                                  "$programName version $version ($compileDate) *** Copyright (c) 2025-2026 Johannes Overmann *** https://github.com/jovermann/scanbadblocks",
+                                  "1.0.4");
 
         cl.addHeader("\nOptions:\n");
         cl.addOption('b', "block-size", "Granularity of reads/writes in bytes.", "BLOCKSIZE", "4M");
