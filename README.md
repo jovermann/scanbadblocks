@@ -19,6 +19,8 @@ Options:
   -s --stride=STRIDE        Distance between read/write offsets. The default tracks --block-size. Use
                             values larger than --block-size to sample the full disk range, e.g.
                             --block-size=1M --stride=1G.
+     --offset=OFFSET        Initial offset before applying --stride. Use this to scan another interleaved
+                            part of the disk, e.g. --block-size=1M --stride=1G --offset=512M. (default=0)
   -w --overwrite            Overwrite device with known pattern and then read it back. This immediately
                             destroys the contents of the disk, erases the disk and deletes all files on the
                             disk. Specify twice to override interactive safety prompt. The default is just
@@ -28,6 +30,8 @@ Options:
                             patterns to clear the disk 4 times are 55,aa,00,ff. The default is 00 resulting
                             in one write pass and one read pass. (default=00)
   -o --outfile=PREFIX       Write timing data to CSV files of the format PREFIX_PASS_DISKSIZE.txt.  (default=scanbadblocks)
+  -d --drop-caches          Linux only: sync and drop page cache, dentries and inodes before starting.
+                            May be used without BLOCK_DEVICE to only drop caches.
   -v --verbose              Increase verbosity. Specify multiple times to be more verbose.
   -h --help                 Print this help message and exit. (set)
      --version              Print version and exit.

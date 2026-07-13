@@ -14,6 +14,7 @@
 #include <numeric>
 #include <ranges>
 #include <format>
+#include <fstream>
 #include <fcntl.h>      // open()
 #include <unistd.h>     // read(), write(), close()
 #include "CommandLineParser.hpp"
@@ -28,12 +29,13 @@ const double GB = 1024.0 * 1024.0 * 1024.0;
 class BlockChecker
 {
 public:
-    BlockChecker(const std::string& filename_, const std::string& blockSizeStr, const std::string& strideSizeStr, const std::string& patternStr, const std::string& outfile_)
+    BlockChecker(const std::string& filename_, const std::string& blockSizeStr, const std::string& strideSizeStr, const std::string& offsetStr, const std::string& patternStr, const std::string& outfile_)
     {
         filename = filename_;
         outfile = outfile_;
         blockSize = ut1::strToU64(blockSizeStr);
         strideSize = strideSizeStr.empty() ? blockSize : ut1::strToU64(strideSizeStr);
+        offsetBytes = ut1::strToU64(offsetStr);
         if (blockSize == 0)
         {
             throw std::runtime_error("Block size must be greater than zero!");
@@ -48,19 +50,25 @@ public:
         }
         patterns = ut1::csvIntegersToVector<uint8_t>(patternStr, 16);
         sizeBytes = ut1::getFileSize(filename);
-        numBlocks = (sizeBytes + strideSize - 1) / strideSize;
+        if (sizeBytes == 0)
+        {
+            throw std::runtime_error("Cannot determine size!");
+        }
+        if (offsetBytes >= sizeBytes)
+        {
+            throw std::runtime_error("Offset must be smaller than device size!");
+        }
+        scanSizeBytes = sizeBytes - offsetBytes;
+        numBlocks = (scanSizeBytes + strideSize - 1) / strideSize;
         blockStats.resize(numBlocks);
         if (numBlocks > 0)
         {
             totalAccessBytesOnePass = (numBlocks - 1) * blockSize + getAccessSize(numBlocks - 1);
         }
-        std::cout << std::format("{}: Size={:.1f} GB ({}, numBlocks={}, blockSize={}, stride={}, size is a multiple of {})\n",
+        std::cout << std::format("{}: Size={:.1f} GB ({}, numBlocks={}, blockSize={}, stride={}, offset={}, scanSize={}, size is a multiple of {})\n",
             filename_, sizeBytes / GB, ut1::getApproxSizeStr(sizeBytes, 1), numBlocks,
-            ut1::getPreciseSizeStr(blockSize), ut1::getPreciseSizeStr(strideSize), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
-        if (sizeBytes == 0)
-        {
-            throw std::runtime_error("Cannot determine size!");
-        }
+            ut1::getPreciseSizeStr(blockSize), ut1::getPreciseSizeStr(strideSize), ut1::getPreciseSizeStr(offsetBytes),
+            ut1::getPreciseSizeStr(scanSizeBytes), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
     }
 
     void checkReadOnly()
@@ -213,7 +221,7 @@ private:
         {
             return;
         }
-        double totalRangeBytesOnePass = double(sizeBytes);
+        double totalRangeBytesOnePass = double(scanSizeBytes);
         double totalBytesOnePass = double(totalAccessBytesOnePass);
         double totalReadBytes = totalBytesOnePass;
         double totalWriteBytes = 0.0;
@@ -225,7 +233,7 @@ private:
             totalWriteBytes = numPasses / 2 * totalBytesOnePass;
         }
 
-        double rangeBytes = std::min(double(blockIndex + 1) * strideSize, double(sizeBytes));
+        double rangeBytes = std::min(double(blockIndex + 1) * strideSize, double(scanSizeBytes));
         double currentBytesPerSecond = elapsed > 0.0 ? (currentPassBytes - lastProgressBytes) / elapsed : 0.0;
         const bool currentPassIsRead = (numPasses == 1) || (passIndex & 1);
         double currentReadBytesPerSecond = currentPassIsRead ? currentBytesPerSecond : 0.0;
@@ -333,7 +341,7 @@ private:
 
     size_t getBlockOffset(size_t blockIndex) const
     {
-        return blockIndex * strideSize;
+        return offsetBytes + blockIndex * strideSize;
     }
 
     size_t getAccessSize(size_t blockIndex) const
@@ -347,7 +355,9 @@ private:
     std::string outfile;
     size_t blockSize{};
     size_t strideSize{};
+    size_t offsetBytes{};
     size_t sizeBytes{};
+    size_t scanSizeBytes{};
     size_t numBlocks{};
     size_t totalAccessBytesOnePass{};
     std::vector<uint8_t> patterns;
@@ -375,6 +385,27 @@ private:
 };
 
 
+void dropLinuxCaches()
+{
+#ifdef __linux__
+    ::sync();
+    std::ofstream os("/proc/sys/vm/drop_caches");
+    if (!os)
+    {
+        throw std::runtime_error(std::format("Error opening /proc/sys/vm/drop_caches for writing ({}). Try running as root.", strerror(errno)));
+    }
+    os << "3\n";
+    if (!os)
+    {
+        throw std::runtime_error("Error writing to /proc/sys/vm/drop_caches. Try running as root.");
+    }
+    std::cout << "Dropped Linux page cache, dentries and inodes.\n";
+#else
+    throw std::runtime_error("--drop-caches is only supported on Linux.");
+#endif
+}
+
+
 /// Main.
 int main(int argc, char* argv[])
 {
@@ -394,16 +425,30 @@ int main(int argc, char* argv[])
         cl.addHeader("\nOptions:\n");
         cl.addOption('b', "block-size", "Granularity of reads/writes in bytes.", "BLOCKSIZE", "4M");
         cl.addOption('s', "stride", "Distance between read/write offsets. The default tracks --block-size. Use values larger than --block-size to sample the full disk range, e.g. --block-size=1M --stride=1G.", "STRIDE");
+        cl.addOption(0, "offset", "Initial offset before applying --stride. Use this to scan another interleaved part of the disk, e.g. --block-size=1M --stride=1G --offset=512M.", "OFFSET", "0");
         cl.addOption('w', "overwrite", "Overwrite device with known pattern and then read it back. This immediately destroys the contents of the disk, erases the disk and deletes all files on the disk. Specify twice to override interactive safety prompt. The default is just to read the disk.");
         cl.addOption('p', "pattern", "Comma separated list of one or more hexadecimal byte values for --overwrite. Each byte will result in one write pass and one read pass on the disk. Useful patterns to clear the disk 4 times are 55,aa,00,ff. The default is 00 resulting in one write pass and one read pass.", "PATTERN", "00");
         cl.addOption('o', "outfile", "Write timing data to CSV files of the format PREFIX_PASS_DISKSIZE.txt. ", "PREFIX", "scanbadblocks");
+        cl.addOption('d', "drop-caches", "Linux only: sync and drop page cache, dentries and inodes before starting. May be used without BLOCK_DEVICE to only drop caches.");
         cl.addOption('v', "verbose", "Increase verbosity. Specify multiple times to be more verbose.");
 
         // Parse command line options.
         cl.parse(argc, argv);
+        if (cl("drop-caches"))
+        {
+            dropLinuxCaches();
+        }
+        if (cl.getArgs().empty())
+        {
+            if (cl("drop-caches"))
+            {
+                return 0;
+            }
+            cl.error("Missing argument: BLOCK_DEVICE.\n");
+        }
         if (cl.getArgs().size() != 1)
         {
-            cl.error("Missing argument: BLOCK_DEVICE.\n");
+            cl.error("Too many arguments.\n");
         }
         std::string filename = cl.getArgs()[0];
         if (!ut1::fsExists(filename))
@@ -412,7 +457,7 @@ int main(int argc, char* argv[])
         }
         verbose = cl.getUInt("verbose");
 
-        BlockChecker blockChecker(filename, cl.getStr("block-size"), cl.getStr("stride"), cl.getStr("pattern"), cl.getStr("outfile"));
+        BlockChecker blockChecker(filename, cl.getStr("block-size"), cl.getStr("stride"), cl.getStr("offset"), cl.getStr("pattern"), cl.getStr("outfile"));
 
         if (cl("overwrite"))
         {
