@@ -15,13 +15,26 @@
 #include <ranges>
 #include <format>
 #include <fstream>
+#include <cstdlib>
+#include <csignal>
 #include <fcntl.h>      // open()
 #include <unistd.h>     // read(), write(), close()
+#include <sys/stat.h>   // fstat()
+#ifdef __linux__
+#include <sys/ioctl.h>  // ioctl()
+#include <linux/fs.h>   // BLKSSZGET
+#endif
 #include "CommandLineParser.hpp"
 #include "MiscUtils.hpp"
 #include "UnitTest.hpp"
 
 static uint64_t verbose = 0; // --verbose
+static volatile std::sig_atomic_t interruptRequested = 0;
+
+extern "C" void handleInterrupt(int)
+{
+    interruptRequested = 1;
+}
 
 const double MB = 1024.0 * 1024.0;
 const double GB = 1024.0 * 1024.0 * 1024.0;
@@ -29,13 +42,15 @@ const double GB = 1024.0 * 1024.0 * 1024.0;
 class BlockChecker
 {
 public:
-    BlockChecker(const std::string& filename_, const std::string& blockSizeStr, const std::string& strideSizeStr, const std::string& offsetStr, const std::string& patternStr, const std::string& outfile_)
+    BlockChecker(const std::string& filename_, const std::string& blockSizeStr, const std::string& strideSizeStr, const std::string& offsetStr, const std::string& sizeStr, const std::string& patternStr, const std::string& outfile_)
     {
         filename = filename_;
         outfile = outfile_;
         blockSize = ut1::strToU64(blockSizeStr);
         strideSize = strideSizeStr.empty() ? blockSize : ut1::strToU64(strideSizeStr);
         offsetBytes = ut1::strToU64(offsetStr);
+        hasOverrideSize = !sizeStr.empty();
+        overrideSizeBytes = hasOverrideSize ? ut1::strToU64(sizeStr) : 0;
         if (blockSize == 0)
         {
             throw std::runtime_error("Block size must be greater than zero!");
@@ -48,11 +63,24 @@ public:
         {
             throw std::runtime_error("Stride must be greater than or equal to block size!");
         }
+        if (hasOverrideSize && overrideSizeBytes == 0)
+        {
+            throw std::runtime_error("Override size must be greater than zero!");
+        }
         patterns = ut1::csvIntegersToVector<uint8_t>(patternStr, 16);
-        sizeBytes = ut1::getFileSize(filename);
-        if (sizeBytes == 0)
+        detectedSizeBytes = ut1::getFileSize(filename);
+        if (detectedSizeBytes == 0)
         {
             throw std::runtime_error("Cannot determine size!");
+        }
+        sizeBytes = detectedSizeBytes;
+        if (hasOverrideSize)
+        {
+            if (overrideSizeBytes > detectedSizeBytes)
+            {
+                throw std::runtime_error(std::format("Override size {} is larger than detected size {}.", ut1::getPreciseSizeStr(overrideSizeBytes), ut1::getPreciseSizeStr(detectedSizeBytes)));
+            }
+            sizeBytes = overrideSizeBytes;
         }
         if (offsetBytes >= sizeBytes)
         {
@@ -65,8 +93,13 @@ public:
         {
             totalAccessBytesOnePass = (numBlocks - 1) * blockSize + getAccessSize(numBlocks - 1);
         }
-        std::cout << std::format("{}: Size={:.1f} GB ({}, numBlocks={}, blockSize={}, stride={}, offset={}, scanSize={}, size is a multiple of {})\n",
-            filename_, sizeBytes / GB, ut1::getApproxSizeStr(sizeBytes, 1), numBlocks,
+        std::string detectedSizeSuffix;
+        if (hasOverrideSize)
+        {
+            detectedSizeSuffix = std::format(", detectedSize={}", ut1::getPreciseSizeStr(detectedSizeBytes));
+        }
+        std::cout << std::format("{}: Size={:.1f} GB ({}{}, numBlocks={}, blockSize={}, stride={}, offset={}, scanSize={}, size is a multiple of {})\n",
+            filename_, sizeBytes / GB, ut1::getApproxSizeStr(sizeBytes, 1), detectedSizeSuffix, numBlocks,
             ut1::getPreciseSizeStr(blockSize), ut1::getPreciseSizeStr(strideSize), ut1::getPreciseSizeStr(offsetBytes),
             ut1::getPreciseSizeStr(scanSizeBytes), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
     }
@@ -91,6 +124,90 @@ public:
         }
     }
 
+    void checkNonDestructiveWrite()
+    {
+#ifndef O_DIRECT
+        throw std::runtime_error("--non-destructive-write requires O_DIRECT support.");
+#else
+        ScopedInterruptHandler interruptHandler;
+        numPasses = 1;
+        readPassesRemaining = 1;
+        writePassesRemaining = 1;
+        blockStats.clear();
+        blockStats.resize(numBlocks);
+        lastProgressTime = ut1::getTimeSec();
+        lastProgressReadBytes = totalRead.bytes;
+        lastProgressWriteBytes = totalWrite.bytes;
+        lastProgressReadTime = totalRead.time;
+        lastProgressWriteTime = totalWrite.time;
+        nonDestructiveProgress = true;
+
+        DirectFile file(filename, O_RDWR | O_DIRECT, "direct non-destructive write");
+        const int fd = file.get();
+
+        const size_t alignment = getDirectIoAlignment(fd);
+        DirectBuffer original(blockSize, alignment);
+        DirectBuffer testData(blockSize, alignment);
+        DirectBuffer verify(blockSize, alignment);
+
+        for (size_t blockIndex = 0; blockIndex < numBlocks; blockIndex++)
+        {
+            if (interruptRequested)
+            {
+                throw std::runtime_error("Interrupted.");
+            }
+            const size_t accessSize = getAccessSize(blockIndex);
+            const size_t offset = getBlockOffset(blockIndex);
+            validateDirectIoRequest(offset, accessSize, alignment);
+
+            double elapsedRead = 0.0;
+            double elapsedWrite = 0.0;
+            bool ok = false;
+
+            const bool originalReadOk = directRead(fd, original.data(), accessSize, offset, blockIndex, elapsedRead);
+            if (originalReadOk)
+            {
+                if (!interruptRequested)
+                {
+                    fillPseudoRandom(testData.data(), accessSize, blockIndex);
+                    ok = directWrite(fd, testData.data(), accessSize, offset, blockIndex, elapsedWrite);
+                    if (ok && !interruptRequested)
+                    {
+                        ok = directRead(fd, verify.data(), accessSize, offset, blockIndex, elapsedRead);
+                        if (ok && std::memcmp(verify.data(), testData.data(), accessSize) != 0)
+                        {
+                            std::cout << std::format("Data error: Non-destructive write verification failed (block {}).\n", blockIndex);
+                            blockStats[blockIndex].errors++;
+                            totalRead.errors++;
+                            ok = false;
+                        }
+                    }
+                    const bool restoreOk = directWrite(fd, original.data(), accessSize, offset, blockIndex, elapsedWrite);
+                    if (!restoreOk)
+                    {
+                        throw std::runtime_error(std::format("Failed to restore original data for block {}.", blockIndex));
+                    }
+                }
+            }
+
+            blockStats[blockIndex].time += elapsedRead + elapsedWrite;
+            if (originalReadOk)
+            {
+                blockStats[blockIndex].bytes += accessSize;
+            }
+            printProgress(blockIndex);
+            if (interruptRequested)
+            {
+                throw std::runtime_error("Interrupted after restoring original block data.");
+            }
+        }
+
+        printPassStats(/*read=*/false);
+        passIndex++;
+        nonDestructiveProgress = false;
+#endif
+    }
+
     void printResult()
     {
         std::cout << std::format("Transfer rates: read={:.1f}MB/s write={:.1f}MB/s\n", getReadBytesPerSecond() / MB, getWriteBytesPerSecond() / MB);
@@ -112,8 +229,10 @@ private:
         blockStats.clear();
         blockStats.resize(numBlocks);
         lastProgressTime = ut1::getTimeSec();
-        lastProgressBytes = 0.0;
-        currentPassBytes = 0;
+        lastProgressReadBytes = totalRead.bytes;
+        lastProgressWriteBytes = totalWrite.bytes;
+        lastProgressReadTime = totalRead.time;
+        lastProgressWriteTime = totalWrite.time;
 
         int fd = ::open(filename.c_str(), O_RDONLY);
         if (fd < 0)
@@ -155,7 +274,6 @@ private:
                 blockStats[blockIndex].bytes += accessSize;
                 totalRead.time += elapsed;
                 totalRead.bytes += accessSize;
-                currentPassBytes += accessSize;
             }
             printProgress(blockIndex);
         }
@@ -171,8 +289,10 @@ private:
         blockStats.clear();
         blockStats.resize(numBlocks);
         lastProgressTime = ut1::getTimeSec();
-        lastProgressBytes = 0.0;
-        currentPassBytes = 0;
+        lastProgressReadBytes = totalRead.bytes;
+        lastProgressWriteBytes = totalWrite.bytes;
+        lastProgressReadTime = totalRead.time;
+        lastProgressWriteTime = totalWrite.time;
 
         // Open outfile.
         int  fd = ::open(filename.c_str(), O_WRONLY, 0666);
@@ -202,7 +322,6 @@ private:
                 blockStats[blockIndex].bytes += accessSize;
                 totalWrite.time += elapsed;
                 totalWrite.bytes += accessSize;
-                currentPassBytes += accessSize;
             }
             printProgress(blockIndex);
         }
@@ -226,6 +345,12 @@ private:
         double totalReadBytes = totalBytesOnePass;
         double totalWriteBytes = 0.0;
         std::string prefix;
+        if (nonDestructiveProgress)
+        {
+            prefix = std::format("non-destructive write pass {}/{}: ", passIndex + 1, numPasses);
+            totalReadBytes = 2 * totalBytesOnePass;
+            totalWriteBytes = 2 * totalBytesOnePass;
+        }
         if (numPasses > 1)
         {
             prefix = std::format("{} pass {}/{} (pat {:02x}): ", (passIndex & 1 ? "read" : "write"), passIndex + 1, numPasses, patterns[passIndex / 2]);
@@ -234,10 +359,10 @@ private:
         }
 
         double rangeBytes = std::min(double(blockIndex + 1) * strideSize, double(scanSizeBytes));
-        double currentBytesPerSecond = elapsed > 0.0 ? (currentPassBytes - lastProgressBytes) / elapsed : 0.0;
-        const bool currentPassIsRead = (numPasses == 1) || (passIndex & 1);
-        double currentReadBytesPerSecond = currentPassIsRead ? currentBytesPerSecond : 0.0;
-        double currentWriteBytesPerSecond = currentPassIsRead ? 0.0 : currentBytesPerSecond;
+        double currentReadTime = totalRead.time - lastProgressReadTime;
+        double currentWriteTime = totalWrite.time - lastProgressWriteTime;
+        double currentReadBytesPerSecond = currentReadTime > 0.0 ? (totalRead.bytes - lastProgressReadBytes) / currentReadTime : 0.0;
+        double currentWriteBytesPerSecond = currentWriteTime > 0.0 ? (totalWrite.bytes - lastProgressWriteBytes) / currentWriteTime : 0.0;
         double percent = (passIndex * totalRangeBytesOnePass + rangeBytes) / (numPasses * totalRangeBytesOnePass) * 100.0;
         double remainingSec = 0.0;
         if (getReadBytesPerSecond() > 0.0)
@@ -260,7 +385,10 @@ private:
             currentWriteBytesPerSecond / MB, getWriteBytesPerSecond() / MB,
             linePerBlock ? "\n" : "   \r") << std::flush;
         lastProgressTime = now;
-        lastProgressBytes = currentPassBytes;
+        lastProgressReadBytes = totalRead.bytes;
+        lastProgressWriteBytes = totalWrite.bytes;
+        lastProgressReadTime = totalRead.time;
+        lastProgressWriteTime = totalWrite.time;
     }
 
     double getReadBytesPerSecond()
@@ -283,7 +411,7 @@ private:
 
     void printPassStats(bool read)
     {
-        std::string readWrite = read ? "read" : "write";
+        std::string readWrite = nonDestructiveProgress ? "non-destructive-write" : (read ? "read" : "write");
         // Write outfile.
         if (!outfile.empty())
         {
@@ -339,6 +467,223 @@ private:
         buffer[7] = pattern ^ ((blockIndex >> 56) & 0xff);
     }
 
+    class ScopedInterruptHandler
+    {
+    public:
+        ScopedInterruptHandler()
+        {
+            interruptRequested = 0;
+            struct sigaction action {};
+            action.sa_handler = handleInterrupt;
+            sigemptyset(&action.sa_mask);
+            action.sa_flags = SA_RESTART;
+            if (::sigaction(SIGINT, &action, &previousAction) != 0)
+            {
+                throw std::runtime_error(std::format("Error installing Ctrl-C handler ({})", strerror(errno)));
+            }
+        }
+
+        ~ScopedInterruptHandler()
+        {
+            ::sigaction(SIGINT, &previousAction, nullptr);
+        }
+
+        ScopedInterruptHandler(const ScopedInterruptHandler&) = delete;
+        ScopedInterruptHandler& operator=(const ScopedInterruptHandler&) = delete;
+
+    private:
+        struct sigaction previousAction {};
+    };
+
+    class DirectBuffer
+    {
+    public:
+        DirectBuffer(size_t size, size_t alignment)
+        : bufferSize(size)
+        {
+            if (::posix_memalign(&buffer, alignment, size) != 0)
+            {
+                throw std::runtime_error("Error allocating aligned direct I/O buffer.");
+            }
+        }
+
+        ~DirectBuffer()
+        {
+            std::free(buffer);
+        }
+
+        DirectBuffer(const DirectBuffer&) = delete;
+        DirectBuffer& operator=(const DirectBuffer&) = delete;
+
+        uint8_t* data() noexcept { return static_cast<uint8_t*>(buffer); }
+        size_t size() const noexcept { return bufferSize; }
+
+    private:
+        void* buffer{};
+        size_t bufferSize{};
+    };
+
+    class DirectFile
+    {
+    public:
+        DirectFile(const std::string& filename, int flags, const std::string& operation)
+        {
+            fd = ::open(filename.c_str(), flags);
+            if (fd < 0)
+            {
+                throw std::runtime_error(std::format("Error opening file '{}' for {} ({})", filename, operation, strerror(errno)));
+            }
+        }
+
+        ~DirectFile()
+        {
+            if (fd >= 0)
+            {
+                ::close(fd);
+            }
+        }
+
+        DirectFile(const DirectFile&) = delete;
+        DirectFile& operator=(const DirectFile&) = delete;
+
+        int get() const noexcept { return fd; }
+
+    private:
+        int fd{-1};
+    };
+
+    size_t getDirectIoAlignment(int fd) const
+    {
+#ifdef __linux__
+        int logicalBlockSize = 0;
+        if (::ioctl(fd, BLKSSZGET, &logicalBlockSize) == 0 && logicalBlockSize > 0)
+        {
+            return static_cast<size_t>(logicalBlockSize);
+        }
+#endif
+        struct stat st {};
+        if (::fstat(fd, &st) == 0 && st.st_blksize > 0)
+        {
+            return static_cast<size_t>(st.st_blksize);
+        }
+        return 4096;
+    }
+
+    void validateDirectIoRequest(size_t offset, size_t accessSize, size_t alignment) const
+    {
+        if ((offset % alignment) != 0 || (accessSize % alignment) != 0)
+        {
+            throw std::runtime_error(std::format("O_DIRECT requires offset and access size to be multiples of {} bytes. Try --block-size and --offset values aligned to the device logical block size.", alignment));
+        }
+    }
+
+    bool directRead(int fd, uint8_t* buffer, size_t accessSize, size_t offset, size_t blockIndex, double& elapsed)
+    {
+        const double startTime = ut1::getTimeSec();
+        const bool ok = exactPread(fd, buffer, accessSize, offset);
+        const double duration = ut1::getTimeSec() - startTime;
+        elapsed += duration;
+        if (!ok)
+        {
+            std::cout << std::format("Read error: block {} ({})\n", blockIndex, strerror(errno));
+            blockStats[blockIndex].errors++;
+            totalRead.errors++;
+        }
+        else
+        {
+            totalRead.bytes += accessSize;
+            totalRead.time += duration;
+        }
+        return ok;
+    }
+
+    bool directWrite(int fd, const uint8_t* buffer, size_t accessSize, size_t offset, size_t blockIndex, double& elapsed)
+    {
+        const double startTime = ut1::getTimeSec();
+        const bool ok = exactPwrite(fd, buffer, accessSize, offset);
+        const double duration = ut1::getTimeSec() - startTime;
+        elapsed += duration;
+        if (!ok)
+        {
+            std::cout << std::format("Write error: block {} ({})\n", blockIndex, strerror(errno));
+            blockStats[blockIndex].errors++;
+            totalWrite.errors++;
+        }
+        else
+        {
+            totalWrite.bytes += accessSize;
+            totalWrite.time += duration;
+        }
+        return ok;
+    }
+
+    bool exactPread(int fd, uint8_t* buffer, size_t size, size_t offset)
+    {
+        size_t done = 0;
+        while (done < size)
+        {
+            ssize_t result = ::pread(fd, buffer + done, size - done, offset + done);
+            if (result <= 0)
+            {
+                if (result < 0 && errno == EINTR)
+                {
+                    continue;
+                }
+                if (result == 0)
+                {
+                    errno = EIO;
+                }
+                return false;
+            }
+            done += static_cast<size_t>(result);
+        }
+        return true;
+    }
+
+    bool exactPwrite(int fd, const uint8_t* buffer, size_t size, size_t offset)
+    {
+        size_t done = 0;
+        while (done < size)
+        {
+            ssize_t result = ::pwrite(fd, buffer + done, size - done, offset + done);
+            if (result <= 0)
+            {
+                if (result < 0 && errno == EINTR)
+                {
+                    continue;
+                }
+                if (result == 0)
+                {
+                    errno = EIO;
+                }
+                return false;
+            }
+            done += static_cast<size_t>(result);
+        }
+        return true;
+    }
+
+    uint64_t pseudoRandomNext(uint64_t& state) const
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    }
+
+    void fillPseudoRandom(uint8_t* buffer, size_t size, size_t blockIndex) const
+    {
+        uint64_t state = 0x9e3779b97f4a7c15ULL ^ (static_cast<uint64_t>(blockIndex) * 0xbf58476d1ce4e5b9ULL);
+        for (size_t i = 0; i < size; i++)
+        {
+            if ((i & 7U) == 0)
+            {
+                pseudoRandomNext(state);
+            }
+            buffer[i] = static_cast<uint8_t>(state >> ((i & 7U) * 8U));
+        }
+    }
+
     size_t getBlockOffset(size_t blockIndex) const
     {
         return offsetBytes + blockIndex * strideSize;
@@ -356,6 +701,9 @@ private:
     size_t blockSize{};
     size_t strideSize{};
     size_t offsetBytes{};
+    bool hasOverrideSize{};
+    size_t overrideSizeBytes{};
+    size_t detectedSizeBytes{};
     size_t sizeBytes{};
     size_t scanSizeBytes{};
     size_t numBlocks{};
@@ -376,12 +724,15 @@ private:
 
     // State:
     double lastProgressTime{};
-    double lastProgressBytes{};
-    size_t currentPassBytes{};
+    size_t lastProgressReadBytes{};
+    size_t lastProgressWriteBytes{};
+    double lastProgressReadTime{};
+    double lastProgressWriteTime{};
     size_t passIndex{};
     size_t readPassesRemaining{};
     size_t writePassesRemaining{};
     size_t numPasses{};
+    bool nonDestructiveProgress{};
 };
 
 
@@ -426,7 +777,9 @@ int main(int argc, char* argv[])
         cl.addOption('b', "block-size", "Granularity of reads/writes in bytes.", "BLOCKSIZE", "4M");
         cl.addOption('s', "stride", "Distance between read/write offsets. The default tracks --block-size. Use values larger than --block-size to sample the full disk range, e.g. --block-size=1M --stride=1G.", "STRIDE");
         cl.addOption(0, "offset", "Initial offset before applying --stride. Use this to scan another interleaved part of the disk, e.g. --block-size=1M --stride=1G --offset=512M.", "OFFSET", "0");
+        cl.addOption('S', "size", "Override detected disk size. Useful to limit tests to a smaller initial portion of a disk, e.g. --size=100G.", "SIZE");
         cl.addOption('w', "overwrite", "Overwrite device with known pattern and then read it back. This immediately destroys the contents of the disk, erases the disk and deletes all files on the disk. Specify twice to override interactive safety prompt. The default is just to read the disk.");
+        cl.addOption('n', "non-destructive-write", "Read each block, write deterministic pseudorandom data with O_DIRECT, verify it, then restore the original block contents. Similar to badblocks -n.");
         cl.addOption('p', "pattern", "Comma separated list of one or more hexadecimal byte values for --overwrite. Each byte will result in one write pass and one read pass on the disk. Useful patterns to clear the disk 4 times are 55,aa,00,ff. The default is 00 resulting in one write pass and one read pass.", "PATTERN", "00");
         cl.addOption('o', "outfile", "Write timing data to CSV files of the format PREFIX_PASS_DISKSIZE.txt. ", "PREFIX", "scanbadblocks");
         cl.addOption('d', "drop-caches", "Linux only: sync and drop page cache, dentries and inodes before starting. May be used without BLOCK_DEVICE to only drop caches.");
@@ -456,8 +809,12 @@ int main(int argc, char* argv[])
             cl.error(std::format("File '{}' does not exist!\n", filename));
         }
         verbose = cl.getUInt("verbose");
+        if (cl("overwrite") && cl("non-destructive-write"))
+        {
+            cl.error("--overwrite and --non-destructive-write are mutually exclusive.\n");
+        }
 
-        BlockChecker blockChecker(filename, cl.getStr("block-size"), cl.getStr("stride"), cl.getStr("offset"), cl.getStr("pattern"), cl.getStr("outfile"));
+        BlockChecker blockChecker(filename, cl.getStr("block-size"), cl.getStr("stride"), cl.getStr("offset"), cl.getStr("size"), cl.getStr("pattern"), cl.getStr("outfile"));
 
         if (cl("overwrite"))
         {
@@ -474,6 +831,10 @@ int main(int argc, char* argv[])
                 }
             }
             blockChecker.checkWriteRead();
+        }
+        else if (cl("non-destructive-write"))
+        {
+            blockChecker.checkNonDestructiveWrite();
         }
         else
         {

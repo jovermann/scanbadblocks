@@ -21,10 +21,14 @@ Options:
                             --block-size=1M --stride=1G.
      --offset=OFFSET        Initial offset before applying --stride. Use this to scan another interleaved
                             part of the disk, e.g. --block-size=1M --stride=1G --offset=512M. (default=0)
+  -S --size=SIZE            Override detected disk size. Useful to limit tests to a smaller initial portion
+                            of a disk, e.g. --size=100G.
   -w --overwrite            Overwrite device with known pattern and then read it back. This immediately
                             destroys the contents of the disk, erases the disk and deletes all files on the
                             disk. Specify twice to override interactive safety prompt. The default is just
                             to read the disk.
+  -n --non-destructive-write Read each block, write deterministic pseudorandom data with O_DIRECT, verify it,
+                            then restore the original block contents. Similar to badblocks -n.
   -p --pattern=PATTERN      Comma separated list of one or more hexadecimal byte values for --overwrite.
                             Each byte will result in one write pass and one read pass on the disk. Useful
                             patterns to clear the disk 4 times are 55,aa,00,ff. The default is 00 resulting
@@ -35,5 +39,5 @@ Options:
   -v --verbose              Increase verbosity. Specify multiple times to be more verbose.
   -h --help                 Print this help message and exit. (set)
      --version              Print version and exit.
-scanbadblocks version 1.0.3 *** Copyright (c) 2025 Johannes Overmann *** https://github.com/jovermann/scanbadblocks
+scanbadblocks version 1.0.4 *** Copyright (c) 2025-2026 Johannes Overmann *** https://github.com/jovermann/scanbadblocks
 ```
