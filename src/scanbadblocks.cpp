@@ -98,10 +98,10 @@ public:
         {
             detectedSizeSuffix = std::format(", detectedSize={}", ut1::getPreciseSizeStr(detectedSizeBytes));
         }
-        std::cout << std::format("{}: Size={:.1f} GB ({}{}, numBlocks={}, blockSize={}, stride={}, offset={}, scanSize={}, size is a multiple of {})\n",
-            filename_, sizeBytes / GB, ut1::getApproxSizeStr(sizeBytes, 1), detectedSizeSuffix, numBlocks,
+        std::cout << std::format("{}: Size={:.1f} GB ({} kBytes{}, numBlocks={}, blockSize={}, stride={}, offset={}, scanSize={}, size is a multiple of {})\n",
+            filename_, sizeBytes / GB, getKBytes(sizeBytes), detectedSizeSuffix, numBlocks,
             ut1::getPreciseSizeStr(blockSize), ut1::getPreciseSizeStr(strideSize), ut1::getPreciseSizeStr(offsetBytes),
-            ut1::getPreciseSizeStr(scanSizeBytes), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
+            getSizeStr(scanSizeBytes), ut1::getPreciseSizeStr(ut1::getLargestPowerOfTwoFactor(sizeBytes)));
     }
 
     void checkReadOnly()
@@ -682,6 +682,16 @@ private:
             }
             buffer[i] = static_cast<uint8_t>(state >> ((i & 7U) * 8U));
         }
+    }
+
+    std::string getSizeStr(size_t bytes) const
+    {
+        return ut1::getApproxSizeStr(static_cast<uint64_t>(bytes), 1, true, true);
+    }
+
+    size_t getKBytes(size_t bytes) const
+    {
+        return bytes / 1024;
     }
 
     size_t getBlockOffset(size_t blockIndex) const
