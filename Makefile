@@ -28,6 +28,14 @@ WARNING_FLAGS ?= -Weverything \
 	-Wno-extra-semi-stmt
 
 CXXSTD ?= -std=c++23
+UNAME_S := $(shell uname -s)
+ifeq ($(origin CXX),default)
+ifeq ($(UNAME_S),Linux)
+CXX = clang++-18
+else
+CXX = g++
+endif
+endif
 BUILD ?= release
 CXXFLAGS_COMMON ?= -Wall
 CXXFLAGS_DEBUG ?= -O0 -g
