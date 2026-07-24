@@ -40,6 +40,7 @@ BUILD ?= release
 CXXFLAGS_COMMON ?= -Wall
 CXXFLAGS_DEBUG ?= -O0 -g
 CXXFLAGS_RELEASE ?= -O3 -DNDEBUG
+PYTEST ?= $(or $(shell command -v pytest 2>/dev/null),pytest-3)
 
 ifeq ($(BUILD),debug)
 CXXFLAGS ?= $(CXXFLAGS_COMMON) $(CXXFLAGS_DEBUG)
@@ -61,6 +62,7 @@ default: $(TARGET)
 
 $(TARGET): $(OBJECTS)
 	$(CXX) $^ -o $@
+	@echo "Done."
 
 $(BUILDDIR)/%.o: %.cpp $(BUILDDIR)/%.d
 	$(CXX) $(CXXSTD) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -82,9 +84,11 @@ $(UNIT_TEST_BUILDDIR)/%.d: %.cpp Makefile
 
 unit_test: $(UNIT_TEST_OBJECTS)
 	$(CXX) $^ -o $@
+	@echo "Done."
 	./unit_test
 
-test: unit_test
+test: unit_test $(TARGET)
+	$(PYTEST) -v
 
 format:
 	clang-format -i --style=file src/*.hpp src/*.cpp
@@ -100,7 +104,7 @@ warnings:
 	$(MAKE) clean
 	$(MAKE) CXXFLAGS="$(CXXFLAGS_RELEASE) $(WARNING_FLAGS)" $(TARGET)
 
-.PHONY: clean default unit_test test format warnings
+.PHONY: clean default unit_test test format tidy warnings
 
 ifeq ($(findstring $(MAKECMDGOALS),clean),)
 ifneq ($(MAKECMDGOALS),unit_test)
