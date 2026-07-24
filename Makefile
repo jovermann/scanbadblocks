@@ -26,12 +26,23 @@ WARNING_FLAGS ?= -Weverything \
 	-Wno-unsafe-buffer-usage \
 	-Wno-unsafe-buffer-usage-in-libc-call \
 	-Wno-extra-semi-stmt
-CXXFLAGS ?= -O3 -Wall
 
 CXXSTD ?= -std=c++23
+BUILD ?= release
+CXXFLAGS_COMMON ?= -Wall
+CXXFLAGS_DEBUG ?= -O0 -g
+CXXFLAGS_RELEASE ?= -O3 -DNDEBUG
 
-BUILDDIR=build
-UNIT_TEST_BUILDDIR=build-unit-test
+ifeq ($(BUILD),debug)
+CXXFLAGS ?= $(CXXFLAGS_COMMON) $(CXXFLAGS_DEBUG)
+else ifeq ($(BUILD),release)
+CXXFLAGS ?= $(CXXFLAGS_COMMON) $(CXXFLAGS_RELEASE)
+else
+$(error Unknown BUILD='$(BUILD)', expected debug or release)
+endif
+
+BUILDDIR=build-$(BUILD)
+UNIT_TEST_BUILDDIR=build-unit-test-$(BUILD)
 SOURCES = $(wildcard src/*.cpp)
 OBJECTS = $(SOURCES:%.cpp=$(BUILDDIR)/%.o)
 DEPENDS := $(SOURCES:%.cpp=$(BUILDDIR)/%.d)
@@ -43,15 +54,15 @@ default: $(TARGET)
 $(TARGET): $(OBJECTS)
 	$(CXX) $^ -o $@
 
-build/%.o: %.cpp build/%.d
+$(BUILDDIR)/%.o: %.cpp $(BUILDDIR)/%.d
 	$(CXX) $(CXXSTD) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-build/%.d: %.cpp Makefile
+$(BUILDDIR)/%.d: %.cpp Makefile
 	@mkdir -p $(@D)
 	$(CXX) $(CXXSTD) $(CPPFLAGS) -MM -MQ $@ $< -o $@
 
 clean:
-	rm -rf build $(UNIT_TEST_BUILDDIR) $(TARGET) unit_test
+	rm -rf build build-* build-unit-test $(TARGET) unit_test
 	find . -name '*~' -delete
 
 $(UNIT_TEST_BUILDDIR)/%.o: %.cpp $(UNIT_TEST_BUILDDIR)/%.d
@@ -79,7 +90,7 @@ tidy: $(TARGET)
 
 warnings:
 	$(MAKE) clean
-	$(MAKE) CXXFLAGS="-O3 $(WARNING_FLAGS)" $(TARGET)
+	$(MAKE) CXXFLAGS="$(CXXFLAGS_RELEASE) $(WARNING_FLAGS)" $(TARGET)
 
 .PHONY: clean default unit_test test format warnings
 
