@@ -31,9 +31,12 @@ CXXFLAGS ?= -O3 -Wall
 CXXSTD ?= -std=c++23
 
 BUILDDIR=build
+UNIT_TEST_BUILDDIR=build-unit-test
 SOURCES = $(wildcard src/*.cpp)
 OBJECTS = $(SOURCES:%.cpp=$(BUILDDIR)/%.o)
 DEPENDS := $(SOURCES:%.cpp=$(BUILDDIR)/%.d)
+UNIT_TEST_OBJECTS = $(SOURCES:%.cpp=$(UNIT_TEST_BUILDDIR)/%.o)
+UNIT_TEST_DEPENDS := $(SOURCES:%.cpp=$(UNIT_TEST_BUILDDIR)/%.d)
 
 default: $(TARGET)
 
@@ -48,11 +51,17 @@ build/%.d: %.cpp Makefile
 	$(CXX) $(CXXSTD) $(CPPFLAGS) -MM -MQ $@ $< -o $@
 
 clean:
-	rm -rf build $(TARGET) unit_test
+	rm -rf build $(UNIT_TEST_BUILDDIR) $(TARGET) unit_test
 	find . -name '*~' -delete
 
-unit_test: CPPFLAGS += -D ENABLE_UNIT_TEST
-unit_test: $(OBJECTS)
+$(UNIT_TEST_BUILDDIR)/%.o: %.cpp $(UNIT_TEST_BUILDDIR)/%.d
+	$(CXX) $(CXXSTD) $(CPPFLAGS) -D ENABLE_UNIT_TEST $(CXXFLAGS) -c $< -o $@
+
+$(UNIT_TEST_BUILDDIR)/%.d: %.cpp Makefile
+	@mkdir -p $(@D)
+	$(CXX) $(CXXSTD) $(CPPFLAGS) -D ENABLE_UNIT_TEST -MM -MQ $@ $< -o $@
+
+unit_test: $(UNIT_TEST_OBJECTS)
 	$(CXX) $^ -o $@
 	./unit_test
 
@@ -75,5 +84,10 @@ warnings:
 .PHONY: clean default unit_test test format warnings
 
 ifeq ($(findstring $(MAKECMDGOALS),clean),)
+ifneq ($(MAKECMDGOALS),unit_test)
 -include $(DEPENDS)
+endif
+ifneq ($(filter unit_test test,$(MAKECMDGOALS)),)
+-include $(UNIT_TEST_DEPENDS)
+endif
 endif
