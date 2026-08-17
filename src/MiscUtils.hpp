@@ -97,6 +97,9 @@ std::string toNfd(const std::string& s);
 /// The suffixes k, M, G, T, P, E are supported for powers of 1024 and are case-insensitive.
 uint64_t strToU64(const std::string& s);
 
+/// Format uint64_t with underscores every three decimal digits.
+std::string formatU64WithUnderscores(uint64_t value);
+
 /// Convert comma separated list of integers to vector.
 /// T may be uint8_t to uint64_t.
 template<typename T> std::vector<T> csvIntegersToVector(std::string_view s, int base = 0)

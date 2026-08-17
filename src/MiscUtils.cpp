@@ -844,6 +844,32 @@ UNIT_TEST(strToU64)
     ASSERT_EQ(ut1::strToU64("3G"), 3ull*1024*1024*1024);
 }
 
+std::string formatU64WithUnderscores(uint64_t value)
+{
+    std::string digits = std::to_string(value);
+    std::string out;
+    out.reserve(digits.size() + digits.size() / 3);
+    for (size_t i = 0; i < digits.size(); i++)
+    {
+        if (i > 0 && (digits.size() - i) % 3 == 0)
+        {
+            out.push_back('_');
+        }
+        out.push_back(digits[i]);
+    }
+    return out;
+}
+
+UNIT_TEST(formatU64WithUnderscores)
+{
+    ASSERT_EQ(ut1::formatU64WithUnderscores(0), "0");
+    ASSERT_EQ(ut1::formatU64WithUnderscores(12), "12");
+    ASSERT_EQ(ut1::formatU64WithUnderscores(123), "123");
+    ASSERT_EQ(ut1::formatU64WithUnderscores(1234), "1_234");
+    ASSERT_EQ(ut1::formatU64WithUnderscores(1234567890), "1_234_567_890");
+    ASSERT_EQ(ut1::formatU64WithUnderscores(18446744073709551615ull), "18_446_744_073_709_551_615");
+}
+
 UNIT_TEST(csvIntegersToVector)
 {
     ASSERT_EQ(ut1::csvIntegersToVector<uint8_t>(""), std::vector<uint8_t>({}));
