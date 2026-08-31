@@ -86,7 +86,7 @@ void UNIT_TEST_RUN();
  {                                                                                      \
   if ((a) != (b))                                                                       \
   {                                                                                     \
-   std::cout << "\nError: ASSERT_EQ(" << toStr(a) << ", " << toStr(b) << ") failed!\n"; \
+   std::cout << "\nError: ASSERT_EQ(" << ut1::toStr(a) << ", " << ut1::toStr(b) << ") failed!\n"; \
    assert((a) == (b));                                                                  \
   }                                                                                     \
  }
@@ -95,7 +95,7 @@ void UNIT_TEST_RUN();
  {                                                                                      \
   if ((a) == (b))                                                                       \
   {                                                                                     \
-   std::cout << "\nError: ASSERT_NE(" << toStr(a) << ", " << toStr(b) << ") failed!\n"; \
+   std::cout << "\nError: ASSERT_NE(" << ut1::toStr(a) << ", " << ut1::toStr(b) << ") failed!\n"; \
    assert((a) != (b));                                                                  \
   }                                                                                     \
  }
